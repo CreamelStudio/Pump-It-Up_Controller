@@ -1,234 +1,184 @@
-using DG.Tweening;
 using System;
 using System.Collections;
+using System.IO;
 using System.IO.Ports;
 using UnityEngine;
 using UnityEngine.UI;
+using DG.Tweening;
 
 public class PumpController : MonoBehaviour
 {
     public static PumpController Instance;
 
     public Image connectingBar;
-
-    public SerialPort serial;
     public int baudRate = 115200;
 
-    private bool isConnected = false;
-    private bool isConnecting = false;
+    public SerialPort serial;
 
-    private void Awake()
+    bool isConnected;
+
+    void Awake()
     {
+        // 싱글톤 설정
         if (Instance == null) Instance = this;
-        else
-        {
-            Destroy(gameObject);
-            return;
-        }
+        else Destroy(gameObject);
     }
 
-    private void Start()
+    void Start()
     {
-        StartCoroutine(Co_ConnectArduino());
-        StartCoroutine(Co_ConnectingBarBlank());
+        // 아두이노 자동 연결 시작
+        StartCoroutine(ConnectArduino());
+
+        // 연결 상태 UI 깜빡임 시작
+        StartCoroutine(BlinkBar());
     }
 
-    IEnumerator Co_ConnectArduino()
+    IEnumerator ConnectArduino()
     {
-        if (isConnecting) yield break;
-        isConnecting = true;
-
+        // 연결될 때까지 계속 반복
         while (!isConnected)
         {
-            string[] ports = SerialPort.GetPortNames();
-
-            foreach (string portName in ports)
+            // 윈도우 / 맥에 맞는 포트 목록 가져오기
+            foreach (string port in GetPorts())
             {
-                SerialPort testPort = null;
+                Debug.Log("포트 확인: " + port);
 
-                Debug.Log($"포트 확인 중: {portName}");
+                SerialPort sp = null;
 
-                bool openSuccess = false;
-
+                // 포트 열기 시도
                 try
                 {
-                    testPort = new SerialPort(portName, baudRate);
-                    testPort.ReadTimeout = 50;
-                    testPort.WriteTimeout = 300;
-                    testPort.NewLine = "\n";
+                    sp = new SerialPort(port, baudRate);
 
-                    // 아두이노가 포트 열릴 때 리셋되는 경우 안정화용
-                    testPort.DtrEnable = true;
-                    testPort.RtsEnable = true;
+                    // ReadLine 같은 블로킹 방지용 짧은 타임아웃
+                    sp.ReadTimeout = 50;
+                    sp.WriteTimeout = 300;
 
-                    testPort.Open();
+                    // 아두이노 Serial.println 기준 줄바꿈
+                    sp.NewLine = "\n";
 
-                    openSuccess = true;
+                    // 일부 아두이노 보드에서 연결 안정화용
+                    sp.DtrEnable = true;
+
+                    sp.Open();
                 }
-                catch (Exception e)
+                catch
                 {
-                    Debug.Log($"포트 열기 실패: {portName} / {e.Message}");
-                    SafeClose(testPort);
-                }
-
-                if (!openSuccess)
-                {
-                    yield return null;
+                    // 포트 열기 실패하면 다음 포트 검사
+                    ClosePort(sp);
                     continue;
                 }
 
-                // 아두이노 리셋 대기
+                // 아두이노는 포트가 열리면 리셋되는 경우가 있어서 잠깐 대기
                 yield return new WaitForSeconds(1.5f);
 
-                SafeDiscardInBuffer(testPort);
-
-                bool writeSuccess = SafeWriteLine(testPort, "PING");
-
-                if (!writeSuccess)
+                // 기존에 남아있던 데이터 비우고 PING 전송
+                try
                 {
-                    SafeClose(testPort);
-                    yield return null;
+                    sp.DiscardInBuffer();
+                    sp.WriteLine("PING");
+                }
+                catch
+                {
+                    ClosePort(sp);
                     continue;
                 }
 
-                float startTime = Time.realtimeSinceStartup;
-                bool found = false;
+                float timer = 0f;
                 string buffer = "";
 
-                while (Time.realtimeSinceStartup - startTime < 2f)
+                // 2초 동안 PONG 응답 대기
+                while (timer < 2f)
                 {
-                    string chunk = SafeReadExisting(testPort);
-
-                    if (!string.IsNullOrEmpty(chunk))
+                    try
                     {
-                        buffer += chunk;
-
-                        Debug.Log($"[{portName}] {chunk.Trim()}");
-
-                        if (buffer.Contains("PONG"))
-                        {
-                            found = true;
-                            break;
-                        }
+                        // 데이터가 있을 때만 읽음
+                        // ReadExisting은 ReadLine보다 덜 멈춤
+                        if (sp.BytesToRead > 0)
+                            buffer += sp.ReadExisting();
+                    }
+                    catch
+                    {
+                        // 읽기 실패하면 이 포트는 포기
+                        break;
                     }
 
-                    // 중요: try/catch 밖이라 가능함
+                    // 아두이노가 PONG을 보내면 연결 성공
+                    if (buffer.Contains("PONG"))
+                    {
+                        serial = sp;
+                        isConnected = true;
+
+                        Debug.Log("아두이노 연결 성공: " + port);
+                        yield break;
+                    }
+
+                    timer += Time.unscaledDeltaTime;
+
+                    // try/catch 밖이라 yield 가능
                     yield return null;
                 }
 
-                if (found)
-                {
-                    serial = testPort;
-                    isConnected = true;
-                    isConnecting = false;
-
-                    Debug.Log($"아두이노 연결 성공: {portName}");
-
-                    yield break;
-                }
-
-                SafeClose(testPort);
-
-                yield return null;
+                // PONG 못 받았으면 포트 닫고 다음 포트 확인
+                ClosePort(sp);
             }
 
-            Debug.LogWarning("아두이노를 찾지 못함. 다시 검색 중...");
+            Debug.LogWarning("아두이노 못 찾음. 재시도...");
+
+            // 너무 빠르게 반복하지 않게 잠깐 대기
             yield return new WaitForSeconds(0.5f);
         }
-
-        isConnecting = false;
     }
 
-    private string SafeReadExisting(SerialPort port)
+    string[] GetPorts()
     {
-        try
-        {
-            if (port == null) return "";
-            if (!port.IsOpen) return "";
-            if (port.BytesToRead <= 0) return "";
+        #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+                // macOS에서는 아두이노가 보통 /dev/cu.usb... 형태로 잡힘
+                if (Directory.Exists("/dev"))
+                    return Directory.GetFiles("/dev", "cu.usb*");
 
-            return port.ReadExisting();
-        }
-        catch (Exception e)
-        {
-            Debug.Log($"시리얼 읽기 실패: {e.Message}");
-            return "";
-        }
+                return Array.Empty<string>();
+        #else
+                // Windows에서는 COM3, COM4 같은 포트가 여기서 잡힘
+                return SerialPort.GetPortNames();
+        #endif
     }
 
-    private bool SafeWriteLine(SerialPort port, string message)
+    IEnumerator BlinkBar()
     {
-        try
-        {
-            if (port == null) return false;
-            if (!port.IsOpen) return false;
-
-            port.WriteLine(message);
-            return true;
-        }
-        catch (Exception e)
-        {
-            Debug.Log($"시리얼 쓰기 실패: {e.Message}");
-            return false;
-        }
-    }
-
-    private void SafeDiscardInBuffer(SerialPort port)
-    {
-        try
-        {
-            if (port != null && port.IsOpen)
-                port.DiscardInBuffer();
-        }
-        catch (Exception e)
-        {
-            Debug.Log($"버퍼 비우기 실패: {e.Message}");
-        }
-    }
-
-    private void SafeClose(SerialPort port)
-    {
-        try
-        {
-            if (port != null && port.IsOpen)
-                port.Close();
-        }
-        catch (Exception e)
-        {
-            Debug.Log($"포트 닫기 실패: {e.Message}");
-        }
-    }
-
-    IEnumerator Co_ConnectingBarBlank()
-    {
+        // 연결 전에는 빨간색으로 깜빡임
         while (!isConnected)
         {
             if (connectingBar != null)
-            {
-                connectingBar.DOKill();
                 connectingBar.DOColor(new Color(1, 0, 0, 1), 0.5f);
-            }
 
             yield return new WaitForSeconds(0.5f);
 
             if (connectingBar != null)
-            {
-                connectingBar.DOKill();
                 connectingBar.DOColor(new Color(1, 0, 0, 0), 0.5f);
-            }
 
             yield return new WaitForSeconds(0.5f);
         }
 
+        // 연결되면 초록색 고정
         if (connectingBar != null)
-        {
-            connectingBar.DOKill();
             connectingBar.DOColor(new Color(0, 1, 0, 1), 0.5f);
-        }
     }
 
-    private void OnApplicationQuit()
+    void ClosePort(SerialPort sp)
     {
-        SafeClose(serial);
+        // 포트 안전하게 닫기
+        try
+        {
+            if (sp != null && sp.IsOpen)
+                sp.Close();
+        }
+        catch { }
+    }
+
+    void OnApplicationQuit()
+    {
+        // 게임 종료 시 포트 닫기
+        ClosePort(serial);
     }
 }
