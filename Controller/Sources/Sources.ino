@@ -2,41 +2,77 @@
 #include <EEPROM.h>
 
 struct ButtonData {
+  const char *name;
   byte pin;
   uint8_t key;
   uint8_t defaultKey;
   bool stablePressed;
   bool lastRawPressed;
+  bool keyboardPressed;
   unsigned long lastChangeMicros;
 };
 
-// 파이썬 UI 순서랑 맞춤
 ButtonData buttons[] = {
-  {9,  'q', 'q', false, false, 0},
-  {10, 'e', 'e', false, false, 0},
-  {8,  ' ', ' ', false, false, 0},
-  {6,  'z', 'z', false, false, 0},
-  {7,  'c', 'c', false, false, 0}
+  {"UP_LEFT", 10, 'q', 'q', false, false, false, 0},
+  {"UP_RIGHT", 11, 'e', 'e', false, false, false, 0},
+  {"CENTER", 9, ' ', ' ', false, false, false, 0},
+  {"DOWN_LEFT", 7, 'z', 'z', false, false, false, 0},
+  {"DOWN_RIGHT", 8, 'c', 'c', false, false, false, 0}
 };
 
 const int buttonCount = sizeof(buttons) / sizeof(buttons[0]);
 
-// INPUT_PULLUP 기준
-// 안 누름 = HIGH
-// 누름 = LOW
-const int PRESSED_LEVEL = LOW;
+const int LED_COUNT = 5;
+const byte ledPins[LED_COUNT] = {A1, A0, A2, A4, A3};
 
-// 반응속도 빠른 디바운스
+enum LedMode {
+  LED_OFF,
+  LED_PRESSED,
+  LED_ON,
+  LED_BLINK,
+  LED_CHASE,
+  LED_TEST,
+  LED_MANUAL
+};
+
+LedMode ledMode = LED_PRESSED;
+unsigned long lastLedMillis = 0;
+unsigned long lastFadeMillis = 0;
+int ledStep = 0;
+bool ledBlinkState = false;
+
+// LED 밝기 / 페이드 설정값
+// PRESSED는 누르는 순간 바로 255, 뗄 때만 PRESSED_FADE_OFF_MS 동안 꺼짐
+const int LED_MAX_BRIGHTNESS = 255;
+const unsigned long LED_FRAME_MS = 10;
+const unsigned long PRESSED_FADE_OFF_MS = 100;
+
+// CHASE는 켜질 때/꺼질 때 둘 다 부드럽게 변화
+const unsigned long CHASE_FADE_IN_MS = 150;
+const unsigned long CHASE_FADE_OUT_MS = 150;
+const unsigned long CHASE_STEP_MS = 150;
+
+// 기존 BLINK / TEST 패턴 속도
+const unsigned long LED_PATTERN_INTERVAL_MS = 80;
+
+// analogWrite 대신 소프트웨어 PWM 사용
+// 이유: 기존 digitalWrite 핀 동작은 그대로 유지하면서 밝기만 흉내냄
+// 값이 낮을수록 깜빡임은 줄지만, 너무 낮으면 CPU 사용이 늘어남
+const unsigned long SOFT_PWM_PERIOD_US = 2000;
+
+int ledBrightness[LED_COUNT] = {0, 0, 0, 0, 0};
+int ledTargetBrightness[LED_COUNT] = {0, 0, 0, 0, 0};
+
+const int PRESSED_LEVEL = LOW;
 const unsigned long DEBOUNCE_MICROS = 1000;
 
-// EEPROM 저장 위치
 const int EEPROM_MAGIC_ADDR = 0;
 const int EEPROM_KEYS_ADDR = 8;
 
 const byte MAGIC0 = 'P';
 const byte MAGIC1 = 'U';
 const byte MAGIC2 = 'M';
-const byte MAGIC3 = 1;
+const byte MAGIC3 = 3;
 
 bool keyboardEnabled = true;
 String serialLine = "";
@@ -98,10 +134,7 @@ uint8_t keyFromName(String name) {
   name = normalize(name);
 
   if (name.length() == 0) return 0;
-
-  if (name.length() == 1) {
-    return (uint8_t)name.charAt(0);
-  }
+  if (name.length() == 1) return (uint8_t)name.charAt(0);
 
   if (name == "space") return ' ';
   if (name == "enter") return KEY_RETURN;
@@ -182,6 +215,14 @@ void printKeyName(uint8_t key) {
   else Serial.print("unknown");
 }
 
+int findButtonIndex(byte pin) {
+  for (int i = 0; i < buttonCount; i++) {
+    if (buttons[i].pin == pin) return i;
+  }
+
+  return -1;
+}
+
 void printKeyMap() {
   Serial.println("KEYMAP,BEGIN");
 
@@ -196,22 +237,420 @@ void printKeyMap() {
   Serial.println("KEYMAP,END");
 }
 
-int findButtonIndex(byte pin) {
-  for (int i = 0; i < buttonCount; i++) {
-    if (buttons[i].pin == pin) return i;
-  }
+void releaseKeyboardForButton(int index) {
+  if (!buttons[index].keyboardPressed) return;
 
-  return -1;
+  Keyboard.release(buttons[index].key);
+  buttons[index].keyboardPressed = false;
 }
 
-void releaseAllButtons() {
+void releaseKeyboardButtons() {
   Keyboard.releaseAll();
 
   for (int i = 0; i < buttonCount; i++) {
-    buttons[i].stablePressed = false;
-    buttons[i].lastRawPressed = false;
-    buttons[i].lastChangeMicros = micros();
+    buttons[i].keyboardPressed = false;
   }
+}
+
+void setKeyboardEnabled(bool enabled) {
+  keyboardEnabled = enabled;
+
+  if (!keyboardEnabled) {
+    releaseKeyboardButtons();
+  }
+}
+
+void applyButtonKeyboardState(int index, bool pressed) {
+  if (!keyboardEnabled) return;
+
+  if (pressed && !buttons[index].keyboardPressed) {
+    Keyboard.press(buttons[index].key);
+    buttons[index].keyboardPressed = true;
+  } else if (!pressed && buttons[index].keyboardPressed) {
+    Keyboard.release(buttons[index].key);
+    buttons[index].keyboardPressed = false;
+  }
+}
+
+void tapButtonKey(int index) {
+  if (!keyboardEnabled) {
+    Serial.println("ERR,KEYBOARD_DISABLED");
+    return;
+  }
+
+  releaseKeyboardForButton(index);
+  Keyboard.press(buttons[index].key);
+  delay(25);
+  Keyboard.release(buttons[index].key);
+
+  Serial.print("OK,TAP,");
+  Serial.print(buttons[index].pin);
+  Serial.print(",");
+  printKeyName(buttons[index].key);
+  Serial.println();
+}
+
+void writeLedPinImmediate(int index, int brightness) {
+  if (index < 0 || index >= LED_COUNT) return;
+
+  digitalWrite(ledPins[index], brightness > 0 ? HIGH : LOW);
+}
+
+void forceLedBrightness(int index, int brightness) {
+  if (index < 0 || index >= LED_COUNT) return;
+
+  brightness = constrain(brightness, 0, LED_MAX_BRIGHTNESS);
+  ledBrightness[index] = brightness;
+  ledTargetBrightness[index] = brightness;
+
+  // 완전 ON/OFF일 때는 기존 코드처럼 바로 digitalWrite로 반영
+  if (brightness == 0 || brightness == LED_MAX_BRIGHTNESS) {
+    writeLedPinImmediate(index, brightness);
+  }
+}
+
+void setLedBrightnessTarget(int index, int brightness) {
+  if (index < 0 || index >= LED_COUNT) return;
+
+  ledTargetBrightness[index] = constrain(brightness, 0, LED_MAX_BRIGHTNESS);
+}
+
+// 기존 코드와 같은 즉시 ON/OFF 함수
+void setLed(int index, bool on) {
+  forceLedBrightness(index, on ? LED_MAX_BRIGHTNESS : 0);
+}
+
+void setAllLeds(bool on) {
+  for (int i = 0; i < LED_COUNT; i++) {
+    setLed(i, on);
+  }
+}
+
+unsigned long ledFadeTimeFor(int index) {
+  int current = ledBrightness[index];
+  int target = ledTargetBrightness[index];
+
+  if (current == target) return 0;
+
+  bool fadingIn = target > current;
+
+  if (ledMode == LED_PRESSED) {
+    // PRESSED는 켜질 때 바로 255, 꺼질 때만 서서히 감소
+    return fadingIn ? 0 : PRESSED_FADE_OFF_MS;
+  }
+
+  if (ledMode == LED_CHASE) {
+    return fadingIn ? CHASE_FADE_IN_MS : CHASE_FADE_OUT_MS;
+  }
+
+  return 0;
+}
+
+void updateLedFade() {
+  unsigned long now = millis();
+
+  if (lastFadeMillis == 0) {
+    lastFadeMillis = now;
+    return;
+  }
+
+  unsigned long elapsed = now - lastFadeMillis;
+
+  if (elapsed < LED_FRAME_MS) {
+    return;
+  }
+
+  lastFadeMillis = now;
+
+  for (int i = 0; i < LED_COUNT; i++) {
+    int current = ledBrightness[i];
+    int target = ledTargetBrightness[i];
+
+    if (current == target) continue;
+
+    unsigned long fadeMs = ledFadeTimeFor(i);
+
+    if (fadeMs == 0) {
+      ledBrightness[i] = target;
+      continue;
+    }
+
+    int amount = (int)((long)LED_MAX_BRIGHTNESS * (long)elapsed / (long)fadeMs);
+    if (amount < 1) amount = 1;
+
+    if (current < target) {
+      current += amount;
+      if (current > target) current = target;
+    } else {
+      current -= amount;
+      if (current < target) current = target;
+    }
+
+    ledBrightness[i] = current;
+  }
+}
+
+void updateSoftPwm() {
+  unsigned long now = micros();
+  int phase = (int)((now % SOFT_PWM_PERIOD_US) * 256UL / SOFT_PWM_PERIOD_US);
+
+  for (int i = 0; i < LED_COUNT; i++) {
+    int brightness = ledBrightness[i];
+
+    if (brightness <= 0) {
+      digitalWrite(ledPins[i], LOW);
+    } else if (brightness >= LED_MAX_BRIGHTNESS) {
+      digitalWrite(ledPins[i], HIGH);
+    } else {
+      digitalWrite(ledPins[i], phase < brightness ? HIGH : LOW);
+    }
+  }
+}
+
+void beginLeds() {
+  for (int i = 0; i < LED_COUNT; i++) {
+    pinMode(ledPins[i], OUTPUT);
+    setLed(i, false);
+  }
+}
+
+void updatePressedLeds() {
+  for (int i = 0; i < LED_COUNT; i++) {
+    if (buttons[i].stablePressed) {
+      // 누른 LED는 기존 코드처럼 해당 인덱스를 바로 켬
+      forceLedBrightness(i, LED_MAX_BRIGHTNESS);
+    } else {
+      // 뗀 LED만 서서히 꺼지게 target을 0으로 둠
+      setLedBrightnessTarget(i, 0);
+    }
+  }
+}
+
+void updateChaseTargets() {
+  int activeIndex = ledStep % LED_COUNT;
+
+  for (int i = 0; i < LED_COUNT; i++) {
+    setLedBrightnessTarget(i, i == activeIndex ? LED_MAX_BRIGHTNESS : 0);
+  }
+}
+
+void applyLedMode() {
+  ledStep = 0;
+  lastLedMillis = millis();
+  lastFadeMillis = millis();
+  ledBlinkState = false;
+
+  if (ledMode == LED_OFF) setAllLeds(false);
+  else if (ledMode == LED_PRESSED) updatePressedLeds();
+  else if (ledMode == LED_ON) setAllLeds(true);
+  else if (ledMode == LED_CHASE) updateChaseTargets();
+}
+
+void updateLedPattern() {
+  unsigned long now = millis();
+
+  if (ledMode == LED_OFF || ledMode == LED_PRESSED || ledMode == LED_ON || ledMode == LED_MANUAL) {
+    return;
+  }
+
+  unsigned long interval = (ledMode == LED_CHASE) ? CHASE_STEP_MS : LED_PATTERN_INTERVAL_MS;
+
+  if (now - lastLedMillis < interval) {
+    return;
+  }
+
+  lastLedMillis = now;
+  ledStep++;
+
+  if (ledMode == LED_BLINK) {
+    ledBlinkState = !ledBlinkState;
+    setAllLeds(ledBlinkState);
+  } else if (ledMode == LED_CHASE) {
+    updateChaseTargets();
+  } else if (ledMode == LED_TEST) {
+    for (int i = 0; i < LED_COUNT; i++) {
+      setLed(i, ((ledStep + i) % 2) == 0);
+    }
+  }
+}
+
+void printLedStatus() {
+  Serial.print("LED,STATUS,");
+
+  if (ledMode == LED_OFF) Serial.println("OFF");
+  else if (ledMode == LED_PRESSED) Serial.println("PRESSED");
+  else if (ledMode == LED_ON) Serial.println("ON");
+  else if (ledMode == LED_BLINK) Serial.println("BLINK");
+  else if (ledMode == LED_CHASE) Serial.println("CHASE");
+  else if (ledMode == LED_TEST) Serial.println("TEST");
+  else if (ledMode == LED_MANUAL) Serial.println("MANUAL");
+}
+
+void printButtonDiagnostics() {
+  Serial.println("DIAG,BEGIN");
+
+  for (int i = 0; i < buttonCount; i++) {
+    Serial.print("BTN,");
+    Serial.print(i);
+    Serial.print(",");
+    Serial.print(buttons[i].name);
+    Serial.print(",");
+    Serial.print(buttons[i].pin);
+    Serial.print(",");
+    Serial.print(isPressed(buttons[i].pin) ? "RAW_DOWN" : "RAW_UP");
+    Serial.print(",");
+    Serial.print(buttons[i].stablePressed ? "STABLE_DOWN" : "STABLE_UP");
+    Serial.print(",");
+    Serial.print(buttons[i].keyboardPressed ? "KEY_DOWN" : "KEY_UP");
+    Serial.print(",");
+    printKeyName(buttons[i].key);
+    Serial.println();
+  }
+
+  Serial.println("DIAG,END");
+}
+
+void resyncButtonBaselines() {
+  unsigned long now = micros();
+
+  for (int i = 0; i < buttonCount; i++) {
+    bool pressed = isPressed(buttons[i].pin);
+    buttons[i].stablePressed = pressed;
+    buttons[i].lastRawPressed = pressed;
+    buttons[i].lastChangeMicros = now;
+  }
+
+  if (ledMode == LED_PRESSED) {
+    updatePressedLeds();
+  }
+}
+
+void handleButtonChange(int index, bool pressed) {
+  buttons[index].stablePressed = pressed;
+  applyButtonKeyboardState(index, pressed);
+
+  Serial.print(pressed ? "DOWN," : "UP,");
+  Serial.println(buttons[index].pin);
+
+  if (ledMode == LED_PRESSED) {
+    updatePressedLeds();
+  }
+}
+
+void scanButtons() {
+  unsigned long now = micros();
+
+  for (int i = 0; i < buttonCount; i++) {
+    bool rawPressed = isPressed(buttons[i].pin);
+
+    if (rawPressed != buttons[i].lastRawPressed) {
+      buttons[i].lastRawPressed = rawPressed;
+      buttons[i].lastChangeMicros = now;
+    }
+
+    if ((now - buttons[i].lastChangeMicros) >= DEBOUNCE_MICROS && rawPressed != buttons[i].stablePressed) {
+      handleButtonChange(i, rawPressed);
+    }
+  }
+}
+
+void handleLedModeCommand(String line) {
+  String modeText = line.substring(9);
+  modeText.trim();
+  modeText.toUpperCase();
+
+  if (modeText == "OFF") ledMode = LED_OFF;
+  else if (modeText == "PRESSED") ledMode = LED_PRESSED;
+  else if (modeText == "ON" || modeText == "SOLID") ledMode = LED_ON;
+  else if (modeText == "BLINK" || modeText == "BREATHE") ledMode = LED_BLINK;
+  else if (modeText == "CHASE" || modeText == "RAINBOW") ledMode = LED_CHASE;
+  else if (modeText == "TEST") ledMode = LED_TEST;
+  else if (modeText == "MANUAL") ledMode = LED_MANUAL;
+  else {
+    Serial.println("ERR,BAD_LED_MODE");
+    return;
+  }
+
+  applyLedMode();
+  Serial.print("OK,LED,MODE,");
+  Serial.println(modeText);
+}
+
+void handleLedSetCommand(String line) {
+  int firstComma = line.indexOf(',', 8);
+  int index = firstComma == -1 ? line.substring(8).toInt() : line.substring(8, firstComma).toInt();
+  int value = firstComma == -1 ? 1 : line.substring(firstComma + 1).toInt();
+
+  if (index < 0 || index >= LED_COUNT) {
+    Serial.println("ERR,BAD_LED_INDEX");
+    return;
+  }
+
+  ledMode = LED_MANUAL;
+  setAllLeds(false);
+  setLed(index, value != 0);
+  Serial.print("OK,LED,SET,");
+  Serial.println(index);
+}
+
+void handleMapCommand(String line) {
+  int firstComma = line.indexOf(',');
+  int secondComma = line.indexOf(',', firstComma + 1);
+
+  if (secondComma == -1) {
+    Serial.println("ERR,BAD_COMMAND");
+    return;
+  }
+
+  String pinText = line.substring(firstComma + 1, secondComma);
+  String keyText = line.substring(secondComma + 1);
+
+  pinText.trim();
+  keyText.trim();
+
+  byte pin = pinText.toInt();
+  int index = findButtonIndex(pin);
+
+  if (index == -1) {
+    Serial.println("ERR,UNKNOWN_PIN");
+    return;
+  }
+
+  uint8_t newKey = keyFromName(keyText);
+
+  if (newKey == 0) {
+    Serial.println("ERR,BAD_KEY");
+    return;
+  }
+
+  releaseKeyboardForButton(index);
+  buttons[index].key = newKey;
+  saveKeyMap();
+
+  Serial.print("OK,M,");
+  Serial.print(pin);
+  Serial.print(",");
+  printKeyName(newKey);
+  Serial.println();
+}
+
+void handleTapCommand(String line) {
+  int comma = line.indexOf(',');
+
+  if (comma == -1) {
+    Serial.println("ERR,BAD_COMMAND");
+    return;
+  }
+
+  byte pin = line.substring(comma + 1).toInt();
+  int index = findButtonIndex(pin);
+
+  if (index == -1) {
+    Serial.println("ERR,UNKNOWN_PIN");
+    return;
+  }
+
+  tapButtonKey(index);
 }
 
 void handleCommand(String line) {
@@ -232,8 +671,26 @@ void handleCommand(String line) {
     return;
   }
 
+  if (upperLine == "DIAG" || upperLine == "BUTTONS") {
+    printButtonDiagnostics();
+    return;
+  }
+
+  if (upperLine == "RELEASE") {
+    releaseKeyboardButtons();
+    Serial.println("OK,RELEASE");
+    return;
+  }
+
+  if (upperLine == "RESYNC") {
+    releaseKeyboardButtons();
+    resyncButtonBaselines();
+    Serial.println("OK,RESYNC");
+    return;
+  }
+
   if (upperLine == "RESET") {
-    releaseAllButtons();
+    releaseKeyboardButtons();
     resetKeyMap();
     Serial.println("OK,RESET");
     printKeyMap();
@@ -241,62 +698,46 @@ void handleCommand(String line) {
   }
 
   if (upperLine == "ENABLE,1") {
-    keyboardEnabled = true;
+    setKeyboardEnabled(true);
     Serial.println("OK,ENABLE,1");
     return;
   }
 
   if (upperLine == "ENABLE,0") {
-    keyboardEnabled = false;
-    releaseAllButtons();
+    setKeyboardEnabled(false);
     Serial.println("OK,ENABLE,0");
     return;
   }
 
+  if (upperLine == "LED,STATUS" || upperLine == "RGB,STATUS") {
+    printLedStatus();
+    return;
+  }
+
+  if (upperLine.startsWith("LED,MODE,") || upperLine.startsWith("RGB,MODE,")) {
+    handleLedModeCommand(line);
+    return;
+  }
+
+  if (upperLine.startsWith("LED,SET,") || upperLine.startsWith("RGB,SET,")) {
+    handleLedSetCommand(line);
+    return;
+  }
+
+  if (upperLine == "LED,TEST" || upperLine == "RGB,TEST") {
+    ledMode = LED_TEST;
+    applyLedMode();
+    Serial.println("OK,LED,TEST");
+    return;
+  }
+
   if (upperLine.startsWith("M,")) {
-    int firstComma = line.indexOf(',');
-    int secondComma = line.indexOf(',', firstComma + 1);
+    handleMapCommand(line);
+    return;
+  }
 
-    if (secondComma == -1) {
-      Serial.println("ERR,BAD_COMMAND");
-      return;
-    }
-
-    String pinText = line.substring(firstComma + 1, secondComma);
-    String keyText = line.substring(secondComma + 1);
-
-    pinText.trim();
-    keyText.trim();
-
-    byte pin = pinText.toInt();
-    int index = findButtonIndex(pin);
-
-    if (index == -1) {
-      Serial.println("ERR,UNKNOWN_PIN");
-      return;
-    }
-
-    uint8_t newKey = keyFromName(keyText);
-
-    if (newKey == 0) {
-      Serial.println("ERR,BAD_KEY");
-      return;
-    }
-
-    // 누른 상태에서 키 변경하면 이전 키가 stuck 될 수 있어서 먼저 해제
-    if (keyboardEnabled && buttons[index].stablePressed) {
-      Keyboard.release(buttons[index].key);
-    }
-
-    buttons[index].key = newKey;
-    saveKeyMap();
-
-    Serial.print("OK,M,");
-    Serial.print(pin);
-    Serial.print(",");
-    printKeyName(newKey);
-    Serial.println();
-
+  if (upperLine.startsWith("TAP,")) {
+    handleTapCommand(line);
     return;
   }
 
@@ -320,61 +761,40 @@ void readSerial() {
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  Keyboard.begin();
-
-  loadKeyMap();
+void setupButtons() {
+  unsigned long now = micros();
 
   for (int i = 0; i < buttonCount; i++) {
     pinMode(buttons[i].pin, INPUT_PULLUP);
 
     bool pressed = isPressed(buttons[i].pin);
-
     buttons[i].stablePressed = pressed;
     buttons[i].lastRawPressed = pressed;
-    buttons[i].lastChangeMicros = micros();
+    buttons[i].keyboardPressed = false;
+    buttons[i].lastChangeMicros = now;
   }
+}
 
-  // 안전모드
-  // 부팅할 때 D6 + D7을 누르고 있으면 키보드 입력 비활성화
-  if (isPressed(6) && isPressed(7)) {
-    keyboardEnabled = false;
-  }
+void setup() {
+  Serial.begin(115200);
+  Keyboard.begin();
+
+  beginLeds();
+  loadKeyMap();
+  setupButtons();
+  applyLedMode();
 
   delay(300);
   Serial.println("READY");
+  Serial.println("KEYBOARD,ENABLED");
   printKeyMap();
+  printButtonDiagnostics();
 }
 
 void loop() {
   readSerial();
-
-  unsigned long now = micros();
-
-  for (int i = 0; i < buttonCount; i++) {
-    bool rawPressed = isPressed(buttons[i].pin);
-
-    if (rawPressed != buttons[i].lastRawPressed) {
-      buttons[i].lastRawPressed = rawPressed;
-      buttons[i].lastChangeMicros = now;
-    }
-
-    if ((now - buttons[i].lastChangeMicros) >= DEBOUNCE_MICROS) {
-      if (rawPressed != buttons[i].stablePressed) {
-        buttons[i].stablePressed = rawPressed;
-
-        if (keyboardEnabled) {
-          if (rawPressed) {
-            Keyboard.press(buttons[i].key);
-          } else {
-            Keyboard.release(buttons[i].key);
-          }
-        }
-
-        Serial.print(rawPressed ? "DOWN," : "UP,");
-        Serial.println(buttons[i].pin);
-      }
-    }
-  }
+  scanButtons();
+  updateLedPattern();
+  updateLedFade();
+  updateSoftPwm();
 }

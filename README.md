@@ -10,7 +10,7 @@ Python GUI에서 각 버튼의 키를 설정하고 Arduino에 전송하면, Ardu
 ## 주요 기능
 
 - Arduino UNO R4 Minima USB 키보드 입력 지원
-- D6, D7, D8, D9, D10 버튼 입력 지원
+- D7, D8, D9, D10, D11 버튼 입력 지원
 - 버튼별 키 매핑 변경
 - 키 캡처 기능
 - Arduino EEPROM 키맵 저장
@@ -25,11 +25,14 @@ Python GUI에서 각 버튼의 키를 설정하고 Arduino에 전송하면, Ardu
 
 | 위치 | Arduino 핀 | 기본 키 |
 |---|---:|---|
-| 상단 왼쪽 | D9 | Q |
-| 상단 오른쪽 | D10 | E |
-| 가운데 | D8 | Space |
-| 하단 왼쪽 | D6 | Z |
-| 하단 오른쪽 | D7 | C |
+| 상단 왼쪽 | D10 | Q |
+| 상단 오른쪽 | D11 | E |
+| 가운데 | D9 | Space |
+| 하단 왼쪽 | D7 | Z |
+| 하단 오른쪽 | D8 | C |
+
+> LED를 D2-D6에 연결한 버전에서는 D6을 버튼 입력으로 같이 사용할 수 없습니다.
+> 기존 하단 왼쪽 버튼이 D6에 연결되어 있다면 D11로 옮겨야 합니다.
 
 ---
 
@@ -57,11 +60,13 @@ Arduino 핀 ─ 버튼 ─ GND
 예시:
 
 ```txt
-D6  ─ 버튼 ─ GND
 D7  ─ 버튼 ─ GND
 D8  ─ 버튼 ─ GND
 D9  ─ 버튼 ─ GND
 D10 ─ 버튼 ─ GND
+D11 ─ 버튼 ─ GND
+
+LED는 버튼 순서 그대로 상단 왼쪽 A0, 상단 오른쪽 A1, 가운데 A2, 하단 왼쪽 A3, 하단 오른쪽 A4에 연결합니다.
 ```
 
 `INPUT_PULLUP` 기준 동작은 다음과 같습니다.
@@ -100,11 +105,11 @@ PRINT
 
 ```txt
 KEYMAP,BEGIN
-MAP,9,q
-MAP,10,e
-MAP,8,space
-MAP,6,z
-MAP,7,c
+MAP,10,q
+MAP,11,e
+MAP,9,space
+MAP,7,z
+MAP,8,c
 KEYMAP,END
 ```
 
@@ -227,11 +232,11 @@ PRINT
 
 ```txt
 KEYMAP,BEGIN
-MAP,9,q
-MAP,10,e
-MAP,8,space
-MAP,6,z
-MAP,7,c
+MAP,10,q
+MAP,11,e
+MAP,9,space
+MAP,7,z
+MAP,8,c
 KEYMAP,END
 ```
 
@@ -244,7 +249,7 @@ M,핀번호,키이름
 예시:
 
 ```txt
-M,6,a
+M,11,a
 M,8,space
 M,9,left
 ```
@@ -252,7 +257,7 @@ M,9,left
 응답 예시:
 
 ```txt
-OK,M,6,a
+OK,M,11,a
 ```
 
 ### 입력 비활성화
@@ -383,11 +388,11 @@ PRINT
 
 ```txt
 KEYMAP,BEGIN
-MAP,9,q
-MAP,10,e
-MAP,8,space
-MAP,6,z
-MAP,7,c
+MAP,10,q
+MAP,11,e
+MAP,9,space
+MAP,7,z
+MAP,8,c
 KEYMAP,END
 ```
 

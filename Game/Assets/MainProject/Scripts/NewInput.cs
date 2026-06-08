@@ -183,11 +183,11 @@ public static class NewInput
         if (defaultBindingsLoaded) return;
 
         defaultBindingsLoaded = true;
-        SetBinding(9, "q");
-        SetBinding(10, "e");
-        SetBinding(8, "space");
-        SetBinding(6, "z");
-        SetBinding(7, "c");
+        SetBinding(10, "q");
+        SetBinding(11, "e");
+        SetBinding(9, "space");
+        SetBinding(7, "z");
+        SetBinding(8, "c");
     }
 
     static Key ToInputSystemKey(string keyName)
@@ -255,11 +255,11 @@ public static class PumpButtonMap
     {
         switch (pin)
         {
-            case 9: return PumpButton.UpLeft;
-            case 10: return PumpButton.UpRight;
-            case 8: return PumpButton.Center;
-            case 6: return PumpButton.DownLeft;
-            case 7: return PumpButton.DownRight;
+            case 10: return PumpButton.UpLeft;
+            case 11: return PumpButton.UpRight;
+            case 9: return PumpButton.Center;
+            case 7: return PumpButton.DownLeft;
+            case 8: return PumpButton.DownRight;
             default: return PumpButton.Unknown;
         }
     }
