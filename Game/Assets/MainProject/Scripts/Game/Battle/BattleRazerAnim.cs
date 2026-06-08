@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using UnityEngine;
 namespace PixPlays.ElementalVFX
 {
-    public class Character : MonoBehaviour
+    public class BattleRazerAnim : MonoBehaviour
     {
         [SerializeField] Animator _Anim;
         [SerializeField] BindingPoints _BindingPoints;
@@ -11,7 +11,6 @@ namespace PixPlays.ElementalVFX
 
         private AnimatorOverrideController _overrideController;
         public BindingPoints BindingPoints => _BindingPoints;
-        public Transform Target => _Target;
 
         private void Start()
         {
@@ -20,6 +19,7 @@ namespace PixPlays.ElementalVFX
                 _overrideController = new AnimatorOverrideController(_Anim.runtimeAnimatorController);
                 _Anim.runtimeAnimatorController = _overrideController;
             }
+            PlayAnimation("BattleRazer", _Anim.runtimeAnimatorController.animationClips[0]);
         }
 
         public void PlayAnimation(string clipId,AnimationClip clip)

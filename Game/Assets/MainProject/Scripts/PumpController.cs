@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.IO;
 using System.IO.Ports;
+using System.Linq;
 using UnityEngine;
 using UnityEngine.UI;
 using DG.Tweening;
@@ -16,63 +17,61 @@ public class PumpController : MonoBehaviour
     public SerialPort serial;
 
     bool isConnected;
+    string serialBuffer = "";
 
     void Awake()
     {
-        // 싱글톤 설정
-        if (Instance == null) Instance = this;
+        if (Instance == null)
+        {
+            Instance = this;
+            DontDestroyOnLoad(gameObject);
+        }
         else Destroy(gameObject);
     }
 
     void Start()
     {
-        // 아두이노 자동 연결 시작
         StartCoroutine(ConnectArduino());
-
-        // 연결 상태 UI 깜빡임 시작
         StartCoroutine(BlinkBar());
+    }
+
+    void Update()
+    {
+        if (!isConnected || serial == null || !serial.IsOpen) return;
+
+        ReadArduinoMessages(serial);
     }
 
     IEnumerator ConnectArduino()
     {
-        // 연결될 때까지 계속 반복
         while (!isConnected)
         {
-            // 윈도우 / 맥에 맞는 포트 목록 가져오기
             foreach (string port in GetPorts())
             {
-                Debug.Log("포트 확인: " + port);
+                Debug.Log("Checking port: " + port);
 
                 SerialPort sp = null;
 
-                // 포트 열기 시도
                 try
                 {
-                    sp = new SerialPort(port, baudRate);
-
-                    // ReadLine 같은 블로킹 방지용 짧은 타임아웃
-                    sp.ReadTimeout = 50;
-                    sp.WriteTimeout = 300;
-
-                    // 아두이노 Serial.println 기준 줄바꿈
-                    sp.NewLine = "\n";
-
-                    // 일부 아두이노 보드에서 연결 안정화용
-                    sp.DtrEnable = true;
+                    sp = new SerialPort(port, baudRate)
+                    {
+                        ReadTimeout = 50,
+                        WriteTimeout = 300,
+                        NewLine = "\n",
+                        DtrEnable = true
+                    };
 
                     sp.Open();
                 }
                 catch
                 {
-                    // 포트 열기 실패하면 다음 포트 검사
                     ClosePort(sp);
                     continue;
                 }
 
-                // 아두이노는 포트가 열리면 리셋되는 경우가 있어서 잠깐 대기
                 yield return new WaitForSeconds(1.5f);
 
-                // 기존에 남아있던 데이터 비우고 PING 전송
                 try
                 {
                     sp.DiscardInBuffer();
@@ -87,45 +86,37 @@ public class PumpController : MonoBehaviour
                 float timer = 0f;
                 string buffer = "";
 
-                // 2초 동안 PONG 응답 대기
                 while (timer < 2f)
                 {
                     try
                     {
-                        // 데이터가 있을 때만 읽음
-                        // ReadExisting은 ReadLine보다 덜 멈춤
                         if (sp.BytesToRead > 0)
                             buffer += sp.ReadExisting();
                     }
                     catch
                     {
-                        // 읽기 실패하면 이 포트는 포기
                         break;
                     }
 
-                    // 아두이노가 PONG을 보내면 연결 성공
                     if (buffer.Contains("PONG"))
                     {
                         serial = sp;
                         isConnected = true;
+                        serialBuffer = "";
 
-                        Debug.Log("아두이노 연결 성공: " + port);
+                        Debug.Log("Arduino connected: " + port);
+                        RequestKeyMap();
                         yield break;
                     }
 
                     timer += Time.unscaledDeltaTime;
-
-                    // try/catch 밖이라 yield 가능
                     yield return null;
                 }
 
-                // PONG 못 받았으면 포트 닫고 다음 포트 확인
                 ClosePort(sp);
             }
 
-            Debug.LogWarning("아두이노 못 찾음. 재시도...");
-
-            // 너무 빠르게 반복하지 않게 잠깐 대기
+            Debug.LogWarning("Arduino not found. Retrying...");
             yield return new WaitForSeconds(0.5f);
         }
     }
@@ -133,20 +124,17 @@ public class PumpController : MonoBehaviour
     string[] GetPorts()
     {
         #if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
-                // macOS에서는 아두이노가 보통 /dev/cu.usb... 형태로 잡힘
-                if (Directory.Exists("/dev"))
-                    return Directory.GetFiles("/dev", "cu.usb*");
+        if (Directory.Exists("/dev"))
+            return Directory.GetFiles("/dev", "cu.usb*");
 
-                return Array.Empty<string>();
+        return Array.Empty<string>();
         #else
-                // Windows에서는 COM3, COM4 같은 포트가 여기서 잡힘
-                return SerialPort.GetPortNames();
+        return SerialPort.GetPortNames();
         #endif
     }
 
     IEnumerator BlinkBar()
     {
-        // 연결 전에는 빨간색으로 깜빡임
         while (!isConnected)
         {
             if (connectingBar != null)
@@ -160,14 +148,82 @@ public class PumpController : MonoBehaviour
             yield return new WaitForSeconds(0.5f);
         }
 
-        // 연결되면 초록색 고정
         if (connectingBar != null)
             connectingBar.DOColor(new Color(0, 1, 0, 1), 0.5f);
     }
 
+    void RequestKeyMap()
+    {
+        try
+        {
+            serial?.WriteLine("PRINT");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("Failed to request Arduino keymap: " + ex.Message);
+        }
+    }
+
+    void ReadArduinoMessages(SerialPort sp)
+    {
+        try
+        {
+            if (sp.BytesToRead <= 0) return;
+
+            serialBuffer += sp.ReadExisting();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("Failed to read Arduino serial data: " + ex.Message);
+            return;
+        }
+
+        while (TryReadLine(out string line))
+        {
+            HandleArduinoLine(line);
+        }
+    }
+
+    bool TryReadLine(out string line)
+    {
+        int newlineIndex = serialBuffer.IndexOf('\n');
+
+        if (newlineIndex < 0)
+        {
+            line = null;
+            return false;
+        }
+
+        line = serialBuffer.Substring(0, newlineIndex).Trim();
+        serialBuffer = serialBuffer.Substring(newlineIndex + 1);
+        return true;
+    }
+
+    void HandleArduinoLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return;
+
+        string[] parts = line.Split(',').Select(part => part.Trim()).ToArray();
+        if (parts.Length == 0) return;
+
+        switch (parts[0])
+        {
+            case "MAP":
+                HandleKeyMapLine(parts);
+                break;
+        }
+    }
+
+    void HandleKeyMapLine(string[] parts)
+    {
+        if (parts.Length < 3) return;
+        if (!int.TryParse(parts[1], out int pin)) return;
+
+        NewInput.SetBinding(pin, parts[2]);
+    }
+
     void ClosePort(SerialPort sp)
     {
-        // 포트 안전하게 닫기
         try
         {
             if (sp != null && sp.IsOpen)
@@ -178,7 +234,7 @@ public class PumpController : MonoBehaviour
 
     void OnApplicationQuit()
     {
-        // 게임 종료 시 포트 닫기
+        NewInput.ReleaseAll();
         ClosePort(serial);
     }
 }

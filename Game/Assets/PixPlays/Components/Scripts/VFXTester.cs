@@ -24,16 +24,10 @@ namespace PixPlays.ElementalVFX
         [SerializeField] List<TestingData> _Data;
         [SerializeField] Character _Character;
         [SerializeField] string _CurrentData;
-        [SerializeField] private Button _ActivateButton;
 
         private int index = 0;
 
         private void Start()
-        {
-            _ActivateButton.onClick.AddListener(OnActivateButtonClicked);
-        }
-
-        private void OnActivateButtonClicked()
         {
             StartCoroutine(Coroutine_Spawn());
         }
@@ -44,7 +38,9 @@ namespace PixPlays.ElementalVFX
             yield return new WaitForSeconds(_Data[index].VfxSpawnDelay);
             BaseVfx go = Instantiate(_Data[index].VFX);
             Transform sourcePoint = _Character.BindingPoints.GetBindingPoint(_Data[index].Source);
-            var vfxData = new VfxData(sourcePoint, _Character.GetTarget(), _Data[index]._Duration, _Data[index]._Radius);
+            VfxData vfxData = _Character.Target != null
+                ? new VfxData(sourcePoint, _Character.Target, _Data[index]._Duration, _Data[index]._Radius)
+                : new VfxData(sourcePoint, _Character.GetTarget(), _Data[index]._Duration, _Data[index]._Radius);
             vfxData.SetGround(_Character.BindingPoints.GetBindingPoint(BindingPointType.Ground));
             go.Play(vfxData);
         }
